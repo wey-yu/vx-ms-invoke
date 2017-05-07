@@ -91,7 +91,7 @@ object Invoke {
 
     })
 
-    router.route("/hi").handler(context => {
+    router.get("/hi").handler(context => {
 
       discovery.getRecordFuture(new JsonObject().put("name", "salutations-prod")).onComplete{
         case Success(result) => {
@@ -125,7 +125,7 @@ object Invoke {
 
     })
 
-    router.route("/").handler(context => {
+    router.get("/").handler(context => {
 
       context
         .response()
