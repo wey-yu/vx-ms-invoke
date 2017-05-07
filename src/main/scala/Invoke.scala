@@ -1,43 +1,27 @@
-/**
-  * Created by k33g on 06/05/2017.
-  */
-
-
-import sun.net.www.http.HttpClient
-
 import io.vertx.core.json.JsonObject
+import io.vertx.core.json.JsonArray
 import io.vertx.scala.core.Vertx
 import io.vertx.scala.ext.web.Router
+import io.vertx.scala.ext.web.client.WebClient
+
 import io.vertx.scala.servicediscovery.types.HttpEndpoint
 import io.vertx.scala.servicediscovery.{ServiceDiscovery, ServiceDiscoveryOptions}
+
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.util.{Failure, Success}
 
 object Invoke {
-  def main(args: Array[String]) {
 
-    val vertx = Vertx.vertx()
-    val server = vertx.createHttpServer()
-    val router = Router.router(vertx)
+  val vertx = Vertx.vertx()
 
-    val redisHost = sys.env.get("REDIS_HOST") match {
-      case None => "127.0.0.1"
-      case Some(host) => host
-    }
-    val redisPort = sys.env.get("REDIS_PORT") match {
-      case None => 6379
-      case Some(port) => port.toInt
-    }
-    val redisAuth = sys.env.get("REDIS_PASSWORD") match {
-      case None => null
-      case Some(auth) => auth
-    }
-    val redisRecordsKey = sys.env.get("REDIS_RECORDS_KEY") match {
-      case None => "scala-records"
-      case Some(key) => key
-    }
+  def discovery: ServiceDiscovery = {
+    // Settings for the Redis backend
+    val redisHost = sys.env.get("REDIS_HOST").getOrElse("127.0.0.1")
+    val redisPort = sys.env.get("REDIS_PORT").getOrElse("6379").toInt
+    val redisAuth = sys.env.get("REDIS_PASSWORD").getOrElse(null)
+    val redisRecordsKey = sys.env.get("REDIS_RECORDS_KEY").getOrElse("scala-records")
 
-
+    // Mount the service discovery backend (Redis)
     val discovery = ServiceDiscovery.create(vertx, ServiceDiscoveryOptions()
       .setBackendConfiguration(
         new JsonObject()
@@ -47,73 +31,22 @@ object Invoke {
           .put("key", redisRecordsKey)
       )
     )
+    // TODO: retry when failure
+    // discovery.close() // or not
+    return discovery
+  }
 
-
-    //discovery.close()
-
-    val httpPort = sys.env.get("PORT") match { // internal port has to be set to 8080 on CC
-      case None => 8080
-      case Some(port) => port.toInt
-    }
-
-    router.route("/yo").handler(context => {
-
-      discovery.getRecordFuture(new JsonObject().put("name", "salutations-prod")).onComplete{
-        case Success(result) => {
-          val reference = discovery.getReference(result)
-
-          val client = reference.getAs(classOf[io.vertx.scala.ext.web.client.WebClient])
-
-          client.get("/api/yo").sendFuture().onComplete{
-            case Success(result) => {
-
-              context
-                .response()
-                .putHeader("content-type", "application/json;charset=UTF-8")
-                .end(result.body())
-
-            }
-            case Failure(cause) => {
-              context
-                .response()
-                .putHeader("content-type", "application/json;charset=UTF-8")
-                .end(new JsonObject().put("error", cause).encodePrettily())
-            }
-          }
-        }
-        case Failure(cause) => {
-          context
-            .response()
-            .putHeader("content-type", "application/json;charset=UTF-8")
-            .end(new JsonObject().put("error", cause).encodePrettily())
-        }
-      }
-
-    })
+  def webServer(router: Router, client: WebClient) = {
+    val server = vertx.createHttpServer()
+    val httpPort = sys.env.get("PORT").getOrElse("8081").toInt
 
     router.get("/hi").handler(context => {
-
-      discovery.getRecordFuture(new JsonObject().put("name", "salutations-prod")).onComplete{
+      client.get("/api/hi").sendFuture().onComplete{
         case Success(result) => {
-          val reference = discovery.getReference(result)
-          val client = reference.getAs(classOf[io.vertx.scala.ext.web.client.WebClient])
-
-          client.get("/api/hi").sendFuture().onComplete{
-            case Success(result) => {
-
-              context
-                .response()
-                .putHeader("content-type", "application/json;charset=UTF-8")
-                .end(result.body())
-
-            }
-            case Failure(cause) => {
-              context
-                .response()
-                .putHeader("content-type", "application/json;charset=UTF-8")
-                .end(new JsonObject().put("error", cause).encodePrettily())
-            }
-          }
+          context
+            .response()
+            .putHeader("content-type", "application/json;charset=UTF-8")
+            .end(result.body())
         }
         case Failure(cause) => {
           context
@@ -122,19 +55,53 @@ object Invoke {
             .end(new JsonObject().put("error", cause).encodePrettily())
         }
       }
-
     })
 
-    router.get("/").handler(context => {
+    router.get("/yo").handler(context => {
+      client.get("/api/yo").sendFuture().onComplete{
+        case Success(result) => {
+          context
+            .response()
+            .putHeader("content-type", "application/json;charset=UTF-8")
+            .end(result.body())
+        }
+        case Failure(cause) => {
+          context
+            .response()
+            .putHeader("content-type", "application/json;charset=UTF-8")
+            .end(new JsonObject().put("error", cause).encodePrettily())
+        }
+      }
+    })
 
+    router.route("/").handler(context => {
       context
         .response()
         .putHeader("content-type", "text/html;charset=UTF-8")
-        .end("<h1>Hello 🌍</h1>")
+        .end("<h1>Hello 🌍 I'm calling microservice(s)</h1>")
     })
 
     println(s"🌍 Listening on $httpPort - Enjoy 😄")
     server.requestHandler(router.accept _).listen(httpPort)
 
   }
+
+  def main(args: Array[String]): Unit = {
+
+    val router = Router.router(vertx)
+    val discoveryService = discovery
+
+    val serviceName = sys.env.get("SERVICE_NAME").getOrElse("hello")
+    // search service by name
+    discoveryService.getRecordFuture(new JsonObject().put("name", serviceName)).onComplete{
+      case Success(result) => {
+        val reference = discoveryService.getReference(result)
+        val client = reference.getAs(classOf[WebClient])
+        webServer(router, client)
+      }
+      case Failure(cause) => {
+        //TODO
+      }
+    }
+  } // end of main
 }
